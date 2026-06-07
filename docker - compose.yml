@@ -1,0 +1,95 @@
+version: "3.9"
+
+# Five consensus nodes + one Byzantine adversary + one client + Toxiproxy.
+# All nodes share two volumes:
+#   - keys/ : Ed25519 public keys (so peers can verify signatures)
+#   - data/ : per-node persistent ledger files
+
+x-node-base: &node-base
+  build: .
+  volumes:
+    - keys:/app/keys
+    - data:/app/data
+  networks: [consensus-net]
+  restart: unless-stopped
+
+services:
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.7.0
+    container_name: toxiproxy
+    ports:
+      - "8474:8474"             # admin API for the chaos script
+    networks: [consensus-net]
+    command: ["-host=0.0.0.0", "-config=/dev/null"]
+
+  node1:
+    <<: *node-base
+    container_name: node1
+    environment:
+      NODE_ID: node1
+      MODE: ${MODE:-PBFT}       # set to PAXOS to run Mode A
+      PEERS: "node2:node2:8000,node3:node3:8000,node4:node4:8000,node5:node5:8000"
+    ports: ["8001:8000"]
+    command: python src/node.py
+
+  node2:
+    <<: *node-base
+    container_name: node2
+    environment:
+      NODE_ID: node2
+      MODE: ${MODE:-PBFT}
+      PEERS: "node1:node1:8000,node3:node3:8000,node4:node4:8000,node5:node5:8000"
+    ports: ["8002:8000"]
+    command: python src/node.py
+
+  node3:
+    <<: *node-base
+    container_name: node3
+    environment:
+      NODE_ID: node3
+      MODE: ${MODE:-PBFT}
+      PEERS: "node1:node1:8000,node2:node2:8000,node4:node4:8000,node5:node5:8000"
+    ports: ["8003:8000"]
+    command: python src/node.py
+
+  node4:
+    <<: *node-base
+    container_name: node4
+    environment:
+      NODE_ID: node4
+      MODE: ${MODE:-PBFT}
+      PEERS: "node1:node1:8000,node2:node2:8000,node3:node3:8000,node5:node5:8000"
+    ports: ["8004:8000"]
+    command: python src/node.py
+
+  # The adversary replaces what would be a 5th honest node, leaving us
+  # with 4 honest + 1 Byzantine — exactly meeting PBFT's 3f+1 bound for f=1.
+  node5:
+    <<: *node-base
+    container_name: node5
+    environment:
+      NODE_ID: node5
+      MODE: PBFT                # adversary only makes sense in PBFT mode
+      PEERS: "node1:node1:8000,node2:node2:8000,node3:node3:8000,node4:node4:8000"
+      BYZANTINE_BEHAVIOUR: ${BYZANTINE_BEHAVIOUR:-all}
+      ATTACK_PROBABILITY: ${ATTACK_PROBABILITY:-0.8}
+    ports: ["8005:8000"]
+    command: python src/adversary.py
+
+  client:
+    <<: *node-base
+    container_name: client
+    environment:
+      CLIENT_ID: client1
+      NODES: "node1:node1:8000,node2:node2:8000,node3:node3:8000,node4:node4:8000,node5:node5:8000"
+      TX_INTERVAL: "1.0"
+    command: python src/client.py
+    depends_on: [node1, node2, node3, node4, node5]
+
+volumes:
+  keys:
+  data:
+
+networks:
+  consensus-net:
+    driver: bridge
